@@ -1,7 +1,7 @@
-FROM node:18-bullseye
+FROM node:20-bookworm
 
-# Install system dependencies required for canvas and ffmpeg
-RUN apt-get update && apt-get install -y \
+# Update package lists and install system dependencies required for canvas and ffmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libcairo2-dev \
     libpango1.0-dev \
