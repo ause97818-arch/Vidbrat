@@ -1,4 +1,5 @@
 const express = require('express');
+const { createCanvas } = require('canvas');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
 const fs = require('fs');
@@ -20,41 +21,55 @@ app.get('/api/vudbrat', async (req, res) => {
             fs.mkdirSync(framesDir, { recursive: true });
         }
 
+        const width = 720;
+        const height = 1280;
         const fps = 30;
         const duration = 3; // 3 seconds video
         const totalFrames = fps * duration;
 
-        // Generate Frames using SVG (Bulletproof for emojis and text)
+        // 1. Generate PNG frames using Canvas (Docker environment supports canvas perfectly)
         for (let i = 0; i < totalFrames; i++) {
+            const canvas = createCanvas(width, height);
+            const ctx = canvas.getContext('2d');
+
+            // Dark Background
+            ctx.fillStyle = '#0f0f0f';
+            ctx.fillRect(0, 0, width, height);
+
             let progress = i / totalFrames;
-            let scale = Math.min(1, progress * 3); // Popup animation effect
+            let scale = Math.min(1, progress * 3); // Popup animation
 
-            // Simple SVG template for exact Brat style box
-            const svgContent = `
-            <svg width="720" height="1280" xmlns="http://www.w3.org/2000/svg">
-                <rect width="720" height="1280" fill="#0f0f0f"/>
-                <g transform="translate(360, 640) scale(${scale}) translate(-360, -640)">
-                    <!-- White Box -->
-                    <rect x="85" y="440" width="550" height="400" fill="#ffffff" filter="drop-shadow(0px 0px 15px rgba(255,255,255,0.7))"/>
-                    <!-- Text & Emojis -->
-                    <text x="360" y="620" font-family="Arial, sans-serif" font-size="38" font-weight="bold" fill="#000000" text-anchor="middle">
-                        ${escapeXml(textQuery)}
-                    </text>
-                    <!-- Watermark -->
-                    <text x="360" y="790" font-family="Arial, sans-serif" font-size="18" fill="#666666" text-anchor="middle">
-                        created by: VudBrat API
-                    </text>
-                </g>
-            </svg>`;
+            ctx.save();
+            ctx.translate(width / 2, height / 2);
+            ctx.scale(scale, scale);
 
-            const framePath = path.join(framesDir, `frame_${String(i).padStart(4, '0')}.svg`);
-            fs.writeFileSync(framePath, svgContent);
+            const boxWidth = 550;
+            const boxHeight = 400;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(-boxWidth / 2, -boxHeight / 2, boxWidth, boxHeight);
+            ctx.restore();
+
+            // Text and Emojis Setup
+            ctx.fillStyle = '#000000';
+            ctx.font = 'bold 36px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            wrapText(ctx, textQuery, width / 2, height / 2, boxWidth - 60, 50);
+
+            // Watermark
+            ctx.fillStyle = '#777777';
+            ctx.font = '20px sans-serif';
+            ctx.fillText("created by: VudBrat API", width / 2, height / 2 + 250);
+
+            const framePath = path.join(framesDir, `frame_${String(i).padStart(4, '0')}.png`);
+            fs.writeFileSync(framePath, canvas.toBuffer('image/png'));
         }
 
-        // Convert SVG frames to MP4 using FFmpeg
+        // 2. Compile PNG frames into MP4 using FFmpeg
         await new Promise((resolve, reject) => {
             ffmpeg()
-                .input(path.join(framesDir, 'frame_%04d.svg'))
+                .input(path.join(framesDir, 'frame_%04d.png'))
                 .inputFPS(fps)
                 .output(outputVideoPath)
                 .videoCodec('libx264')
@@ -64,17 +79,30 @@ app.get('/api/vudbrat', async (req, res) => {
                 .run();
         });
 
-        // Send video response
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Disposition', 'inline; filename="vudbrat.mp4"');
-        const videoStream = fs.createReadStream(outputVideoPath);
-        videoStream.pipe(res);
+        // 3. Upload generated video to your CDN API
+        const videoBuffer = fs.readFileSync(outputVideoPath);
+        const blob = new Blob([videoBuffer], { type: 'video/mp4' });
+        const formData = new FormData();
+        formData.append('file', blob, `vudbrat_${uniqueId}.mp4`);
 
-        videoStream.on('close', () => {
-            try {
-                fs.rmSync(framesDir, { recursive: true, force: true });
-                fs.unlinkSync(outputVideoPath);
-            } catch (e) {}
+        const cdnResponse = await fetch('https://cdnfiles.zone.id/api/upload', {
+            method: 'POST',
+            body: formData
+        });
+
+        const cdnResult = await cdnResponse.json();
+
+        // 4. Cleanup local temp files
+        try {
+            fs.rmSync(framesDir, { recursive: true, force: true });
+            fs.unlinkSync(outputVideoPath);
+        } catch (e) {}
+
+        // 5. Send final CDN response back to the user
+        res.json({
+            status: "success",
+            message: "Video generated and uploaded successfully!",
+            data: cdnResult
         });
 
     } catch (error) {
@@ -83,16 +111,27 @@ app.get('/api/vudbrat', async (req, res) => {
     }
 });
 
-function escapeXml(unsafe) {
-    return unsafe.replace(/[<>&'"]/g, function (c) {
-        switch (c) {
-            case '<': return '&lt;';
-            case '>': return '&gt;';
-            case '&': return '&amp;';
-            case '\'': return '&apos;';
-            case '"': return '&quot;';
+function wrapText(context, text, x, y, maxWidth, lineHeight) {
+    const words = text.split(' ');
+    let line = '';
+    let lines = [];
+
+    for (let n = 0; n < words.length; n++) {
+        let testLine = line + words[n] + ' ';
+        let metrics = context.measureText(testLine);
+        if (metrics.width > maxWidth && n > 0) {
+            lines.push(line);
+            line = words[n] + ' ';
+        } else {
+            line = testLine;
         }
-    });
+    }
+    lines.push(line);
+
+    let startY = y - ((lines.length - 1) * lineHeight) / 2;
+    for (let k = 0; k < lines.length; k++) {
+        context.fillText(lines[k], x, startY + (k * lineHeight));
+    }
 }
 
 app.listen(PORT, () => {
