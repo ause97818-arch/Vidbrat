@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/vudbrat.js": {
+      "maxDuration": 30
+    }
+  }
+}
